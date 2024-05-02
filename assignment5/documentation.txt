@@ -1,0 +1,165 @@
+// struct socket_info SOCK_INFO;
+struct sock_info{
+    int sock_id; -> UDP Socket id
+    int port;    -> UDP port number
+    int errrno;   -> error 
+    char IP[16];  -> UDP IP address
+};
+
+// rwnd (a structure of the receiver window size along with an  array of message sequence numbers that have been received but not acknowledged).
+struct rwnd{
+    int size;  -> window size
+    int first; -> window first pointer
+    int last;  -> window last pointer
+    int valid[5]; -> valid bits to indicate wether there is a message or not
+    int msg_count; -> message count
+    int seqnum;   -> Expecting Sequence Number of First pointer
+};
+
+// swnd (a structure of the sender window size along with an array of message sequence numbers that have been sent but not acknowledged).
+struct swnd{
+    int size;  -> window size
+    int first; -> window first pointer
+    int last;  -> window last pointer
+    int seqnum;  -> Expecting Sequence Number of First pointer
+    int msg_count;  -> message count
+    time_t t;  -> last sent time for the window
+};
+
+//Data structure of shared memory
+struct sm{
+    int status;  -> status of the socket 
+    int pid;     -> process id 
+    int udp_id;  -> UDP socket id 
+    int port;    -> Destination port number
+    int nospace; -> indicating the buffer space 
+    int closed;  -> indicating wether the socket is closed
+    char IP[16]; -> Destination IP Address
+    char recv_buffer[5][1024];  -> Recieve Buffer
+    char send_buffer[10][1024]; -> Send Buffer 
+    struct rwnd rwnd;   -> reciever Window Structure
+    struct swnd swnd;   -> sender Window Structure
+};
+
+
+// Socket Calls
+
+---------->m_socket(int domain, int type, int protocol)
+
+->Socket Creation: This function is responsible for creating a socket and managing shared memory and semaphores. It validates the socket type and if it's not of type SOCK_MTP, it sets errno to EINVAL and returns -1.
+
+->Socket Allocation: It allocates a socket from a pool of sockets (MAX_SOCKETS) with available slots. If no sockets are available, it sets errno to ENOBUFS and returns -1.
+
+->Shared Memory Handling: After successfully allocating a socket, it initializes shared memory values for the socket and detaches shared memory.
+
+--------->m_bind(int sockfd, const struct sockaddr *src_addr, socklen_t src_addrlen, const struct sockaddr *des_addr, socklen_t des_addrlen)
+
+->Binding Sockets: This function binds the socket to a source IP and port and a destination IP and port. It extracts necessary information from the provided addresses and stores them in shared memory.
+
+->Communication with Semaphore: It utilizes semaphores for synchronization to ensure proper binding and updates shared memory accordingly.
+
+->Error Handling: It checks for errors during the binding process, sets appropriate errno values, and detaches shared memory if necessary.
+
+---------->m_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen)
+
+->Sending Data: This function sends data over the socket to the specified destination address. It manages a send buffer in shared memory to handle outgoing messages.
+
+->Buffer Management: It checks if there's enough space in the send buffer to accommodate the message. If not, it sets errno to ENOBUFS and returns -1.
+
+->Synchronization: It ensures proper synchronization using semaphores (mtx_S) to avoid race conditions during sending data.
+
+------------>m_recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen)
+
+->Receiving Data: This function receives data from the socket and stores it in the provided buffer. It manages a receive buffer in shared memory to handle incoming messages.
+
+->Buffer Management: It checks if there are any messages available in the receive buffer. If not, it sets errno to ENOMSG and returns -1.
+
+->Synchronization: Similar to sending, it ensures synchronization using semaphores (mtx_R) to avoid race conditions during receiving data.
+
+----------->m_close(int fd)
+
+->Socket Closing: This function is responsible for closing a socket. It marks the socket as closed in shared memory to prevent further operations on it.
+
+->Synchronization: It ensures proper synchronization using semaphores (mtx_S) to avoid race conditions during socket closure.
+
+->Error Handling: It checks if the socket is already closed and returns -1 accordingly. Otherwise, it marks the socket as closed and returns 0.
+
+
+// Threads
+
+Thread-S
+
+Thread Initialization: Upon creation, the thread prints a message indicating its creation.
+
+Periodic Check: The thread enters an infinite loop and repeatedly checks for message timeouts. It does this by sleeping for a duration less than half of the timeout period (T/2) specified by TIMEOUT_DURATION.
+
+Timeout Check: Within the loop, it iterates over all active MTP sockets. For each active socket, it waits on the semaphore mtx_S to ensure exclusive access to shared memory.
+
+Message Timeout Handling: For each active socket, it checks if the timeout duration (T) has elapsed since the last message transmission. If the timeout has occurred, it constructs and sends messages from the send buffer associated with the socket.
+
+Message Sending: It constructs messages using the data from the send buffer and sends them using the sendto system call. It updates the timestamp (t) associated with the send window of the socket.
+
+Error Handling: If an error occurs during message sending, it prints an error message and exits the program.
+
+Semaphore Signaling: After processing each socket, it signals the semaphore mtx_S to release the lock on shared memory, allowing other threads to access it.
+
+Thread-R
+
+Thread Initialization: Upon creation, the thread prints a message indicating its creation.
+
+File Descriptor Initialization: It initializes a set (read_fds) to monitor for incoming data on UDP sockets.
+
+Main Loop:
+
+The thread enters an infinite loop to continually monitor incoming messages.
+It iterates through all active sockets and adds their corresponding UDP socket descriptors to the read_fds set.
+Select Call:
+
+It sets a timeout duration using select() to wait for activity on the UDP sockets.
+If there's activity or timeout, it proceeds to handle incoming messages.
+Message Reception:
+
+Upon receiving data on any active UDP socket, it waits for the mtx_R semaphore to access shared memory safely.
+It receives the message using recvfrom() and processes it accordingly based on its type:
+ACK messages: It updates the send window and checks for duplicates.
+Data messages: It processes incoming data, updates the receive window, and sends appropriate ACKs.
+Duplicate ACK messages: It handles cases when there's no space in the receiver buffer and sends duplicate ACKs.
+Error Handling:
+
+It handles errors that may occur during sending or receiving messages using sendto() or recvfrom() functions.
+Semaphore Signaling:
+
+After processing each socket, it signals the mtx_R semaphore to release the lock on shared memory, allowing other threads to access it.
+
+Thread-G
+Thread Initialization: Upon creation, the thread prints a message indicating its creation.
+
+Main Loop:
+
+The thread enters an infinite loop to continually monitor the status of active sockets.
+It iterates through all active sockets and checks their status and closure flags.
+Socket Status Check:
+
+For each active socket, it waits for the mtx_S semaphore to access shared memory safely.
+It checks if the process associated with the socket is still alive using the kill() system call. If the process is terminated, it indicates that the socket needs to be cleaned up.
+Socket Cleanup:
+
+If the process associated with the socket is terminated, it resets all socket-related fields in shared memory to their initial state, effectively cleaning up the socket resources.
+If the socket is marked as closed, it also closes the corresponding UDP socket using the close() system call and then cleans up the socket resources similarly.
+Semaphore Signaling:
+
+After processing each socket, it signals the mtx_S semaphore to release the lock on shared memory, allowing other threads to access it.
+
+//Drop messages
+P       Messages    transmissions
+0.05      450          487
+0.1       450          526
+0.15      450          615
+0.20      450          645
+0.25      450          765
+0.3       450          895
+0.35      450          976
+0.4       450          1101
+0.45      450          1225
+0.50      450          1378
+
