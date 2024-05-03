@@ -4,7 +4,7 @@ This repository contains the code for individual assignments of Networks lab (CS
 ## Assignments
 
 ```bash
-compilers_lab
+networks_lab
 │   README.md
 │   LICENSE
 └───assignment1
